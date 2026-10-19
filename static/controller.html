@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Phone Pad</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box;
+      -webkit-user-select:none; user-select:none;
+      -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
+  html, body { height:100%; width:100%; position:fixed; overflow:hidden;
+      background:#14161a; color:#dfe3e8; font-family:system-ui, sans-serif;
+      touch-action:none; overscroll-behavior:none; }
+
+  #stream { position:absolute; inset:0; width:100%; height:100%;
+      object-fit:contain; background:#000; display:none; }
+  #controls { position:absolute; inset:0; }
+
+  .hud { position:absolute; top:1.5%; left:50%; transform:translateX(-50%);
+      display:flex; gap:12px; align-items:center; font-size:13px; z-index:5;
+      background:rgba(20,22,26,.55); padding:4px 14px; border-radius:20px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:#c33; }
+  .dot.ok { background:#3c9; }
+  #player { font-weight:700; }
+  #mock { color:#e6b450; display:none; }
+  .chip { background:rgba(50,55,65,.8); border:1px solid #3a3f49;
+      border-radius:12px; padding:2px 10px; cursor:pointer; font-weight:600; }
+
+  .ctl { position:absolute; transform:translate(-50%,-50%);
+      display:flex; align-items:center; justify-content:center;
+      font-weight:800; color:#e8ebef; letter-spacing:.5px;
+      background:rgba(24,27,33,.55);
+      box-shadow:0 2px 10px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.07);
+      transition:transform .05s; }
+  .round { border-radius:50%; }
+  .pill { border-radius:3.5vmin; }
+  .ctl.on { transform:translate(-50%,-50%) scale(.92); color:#101216; }
+
+  .zone { position:absolute; transform:translate(-50%,-50%); border-radius:50%;
+      background:rgba(27,30,36,.45); border:2px solid rgba(70,76,88,.65);
+      box-shadow:inset 0 0 18px rgba(0,0,0,.5); }
+  .knob { position:absolute; left:50%; top:50%; width:46%; height:46%;
+      margin:-23% 0 0 -23%; border-radius:50%;
+      background:radial-gradient(circle at 35% 30%, #4a515e, #2c313a 70%);
+      border:2px solid #58606f; box-shadow:0 3px 8px rgba(0,0,0,.5); }
+
+  .dpad { position:absolute; transform:translate(-50%,-50%); border-radius:50%;
+      background:rgba(27,30,36,.45); border:2px solid rgba(70,76,88,.65); }
+  .arm { position:absolute; width:30%; height:30%; display:flex;
+      align-items:center; justify-content:center; font-size:4vmin;
+      color:#9aa4b1; border-radius:18%; background:rgba(40,44,52,.6); }
+  .arm.lit { background:#5b9bf0; color:#101216; }
+  .arm.u { left:35%; top:3%; }  .arm.d { left:35%; bottom:3%; }
+  .arm.l { left:3%; top:35%; }  .arm.r { right:3%; top:35%; }
+
+  #rot { position:fixed; inset:0; background:#14161a; z-index:50;
+      display:none; align-items:center; justify-content:center;
+      text-align:center; font-size:5vmin; padding:6vw; }
+  @media (orientation: portrait) { #rot { display:flex; } }
+</style>
+</head>
+<body>
+  <video id="stream" autoplay playsinline muted></video>
+  <div id="controls"></div>
+  <div id="rot">Turn your phone sideways 🔄<br><small>then tap the screen</small></div>
+
+  <div class="hud">
+    <div class="dot" id="dot"></div>
+    <span id="player">connecting…</span>
+    <span id="mock">TEST MODE</span>
+    <span id="ping"></span>
+    <span class="chip" id="lay">N64</span>
+    <span class="chip" id="unmute" style="display:none">🔊</span>
+    <span class="chip" id="fs">⛶</span>
+  </div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  let code = (qs.get("s") || localStorage.getItem("padcode") || "").toUpperCase();
+  if (!code) code = (prompt("Session code (shown on the PC):") || "").toUpperCase();
+  try { localStorage.setItem("padcode", code); } catch (e) {}
+
+  const state = { btn:{}, lx:0, ly:0, rx:0, ry:0, lt:0, rt:0 };
+  let ws = null, dirty = true, lastSent = 0;
+  const vib = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
+
+  function setBtn(name, v) { if ((state.btn[name] || 0) !== v) { state.btn[name] = v; dirty = true; } }
+  function setAxis(name, v) { if (state[name] !== v) { state[name] = v; dirty = true; } }
+  function resetState() {
+    state.btn = {}; state.lx = state.ly = state.rx = state.ry = state.lt = state.rt = 0;
+    dirty = true;
+  }
+
+  /* ============== layouts ==============
+     send: {btn:"a"} presses a pad button; {axis:"lt",v:1} drives an axis.
+     The chain phone→Xbox pad→RetroArch→console makes each label do the
+     authentic thing in-game (N64 A = accelerate in MK64, Z = item, R = hop). */
+  const L = {
+    /* Verified against the core's source (emulate_game_controller_via_libretro.c):
+       N64 A=RetroPad B, B=Y, Z=L2, R shoulder=R2, L shoulder=SELECT,
+       C buttons=right analog. Phone keys already position-map to RetroPad. */
+    n64: { name:"N64", controls: [
+      { t:"btn", shape:"pill", x:8,  y:9,  w:11, h:7,  label:"L",  color:"#8a93a0", send:{btn:"back"} },
+      { t:"btn", shape:"pill", x:25, y:9,  w:17, h:8,  label:"Z",  hint:"item", color:"#b66ad1", send:{axis:"lt",v:1} },
+      { t:"btn", shape:"pill", x:88, y:9,  w:19, h:8,  label:"R",  hint:"hop", color:"#e07f3f", send:{axis:"rt",v:1} },
+      { t:"btn", shape:"round",x:50, y:15, d:9,  label:"S", hint:"start", color:"#d14a4a", send:{btn:"start"} },
+      { t:"stick", x:17, y:55, d:38, ax:"lx", ay:"ly" },
+      { t:"dpad",  x:11, y:88, d:17 },
+      { t:"btn", shape:"round",x:67, y:46, d:13, label:"B", hint:"brake", color:"#43b06c", send:{btn:"x"} },
+      { t:"btn", shape:"round",x:82, y:66, d:19, label:"A", hint:"gas", color:"#3a7bd5", send:{btn:"a"} },
+      { t:"btn", shape:"round",x:84, y:20, d:9,  label:"C▲", color:"#f5c542", send:{axis:"ry",v:1} },
+      { t:"btn", shape:"round",x:84, y:41, d:9,  label:"C▼", color:"#f5c542", send:{axis:"ry",v:-1} },
+      { t:"btn", shape:"round",x:76.5,y:30.5,d:9, label:"C◀", color:"#f5c542", send:{axis:"rx",v:-1} },
+      { t:"btn", shape:"round",x:91.5,y:30.5,d:9, label:"C▶", color:"#f5c542", send:{axis:"rx",v:1} },
+    ]},
+    snes: { name:"SNES", controls: [
+      { t:"btn", shape:"pill", x:9,  y:9,  w:16, h:7, label:"L", color:"#8a93a0", send:{btn:"lb"} },
+      { t:"btn", shape:"pill", x:91, y:9,  w:16, h:7, label:"R", color:"#8a93a0", send:{btn:"rb"} },
+      { t:"btn", shape:"pill", x:41, y:13, w:13, h:6, label:"SELECT", color:"#8a93a0", send:{btn:"back"} },
+      { t:"btn", shape:"pill", x:59, y:13, w:13, h:6, label:"START",  color:"#8a93a0", send:{btn:"start"} },
+      { t:"dpad", x:16, y:58, d:30 },
+      { t:"btn", shape:"round",x:84, y:30, d:12, label:"X", color:"#4a7bd5", send:{btn:"y"} },
+      { t:"btn", shape:"round",x:75, y:50, d:12, label:"Y", color:"#43b06c", send:{btn:"x"} },
+      { t:"btn", shape:"round",x:93, y:50, d:12, label:"A", color:"#d14a4a", send:{btn:"b"} },
+      { t:"btn", shape:"round",x:84, y:70, d:13, label:"B", color:"#f5c542", send:{btn:"a"} },
+    ]},
+    nes: { name:"NES", controls: [
+      { t:"btn", shape:"pill", x:41, y:12, w:13, h:6, label:"SELECT", color:"#8a93a0", send:{btn:"back"} },
+      { t:"btn", shape:"pill", x:59, y:12, w:13, h:6, label:"START",  color:"#8a93a0", send:{btn:"start"} },
+      { t:"dpad", x:17, y:55, d:32 },
+      { t:"btn", shape:"round",x:74, y:58, d:15, label:"B", color:"#c23a3a", send:{btn:"a"} },
+      { t:"btn", shape:"round",x:89, y:58, d:15, label:"A", color:"#c23a3a", send:{btn:"b"} },
+    ]},
+    xbox: { name:"XBOX", controls: [
+      { t:"btn", shape:"pill", x:9,  y:9, w:15, h:7, label:"LB", color:"#8a93a0", send:{btn:"lb"} },
+      { t:"btn", shape:"pill", x:24, y:9, w:15, h:7, label:"LT", color:"#8a93a0", send:{axis:"lt",v:1} },
+      { t:"btn", shape:"pill", x:76, y:9, w:15, h:7, label:"RT", color:"#8a93a0", send:{axis:"rt",v:1} },
+      { t:"btn", shape:"pill", x:91, y:9, w:15, h:7, label:"RB", color:"#8a93a0", send:{btn:"rb"} },
+      { t:"btn", shape:"pill", x:41, y:13, w:12, h:6, label:"SELECT", color:"#8a93a0", send:{btn:"back"} },
+      { t:"btn", shape:"pill", x:59, y:13, w:12, h:6, label:"START",  color:"#8a93a0", send:{btn:"start"} },
+      { t:"stick", x:16, y:48, d:34, ax:"lx", ay:"ly" },
+      { t:"dpad",  x:15, y:84, d:24 },
+      { t:"btn", shape:"round",x:84,  y:27, d:12, label:"Y", color:"#f5c542", send:{btn:"y"} },
+      { t:"btn", shape:"round",x:76.5,y:45, d:12, label:"X", color:"#4a7bd5", send:{btn:"x"} },
+      { t:"btn", shape:"round",x:91.5,y:45, d:12, label:"B", color:"#d14a4a", send:{btn:"b"} },
+      { t:"btn", shape:"round",x:84,  y:63, d:13, label:"A", color:"#43b06c", send:{btn:"a"} },
+      { t:"stick", x:84, y:84, d:26, ax:"rx", ay:"ry" },
+    ]},
+  };
+  const ORDER = ["n64", "snes", "nes", "xbox"];
+  let layout = (qs.get("layout") || localStorage.getItem("padlayout") || "n64").toLowerCase();
+  if (!L[layout]) layout = "n64";
+
+  /* ============== renderers ============== */
+  function makeBtn(c) {
+    const el = document.createElement("div");
+    el.className = "ctl " + c.shape;
+    if (c.hint) {
+      el.innerHTML = "<div style='text-align:center;line-height:1.1'><div></div>" +
+        "<div style='font-size:55%;font-weight:600;opacity:.75'></div></div>";
+      el.firstChild.children[0].textContent = c.label;
+      el.firstChild.children[1].textContent = c.hint;
+    } else el.textContent = c.label;
+    el.style.left = c.x + "%"; el.style.top = c.y + "%";
+    if (c.shape === "round") { el.style.width = el.style.height = c.d + "vmin"; el.style.fontSize = Math.max(3, c.d * .34) + "vmin"; }
+    else { el.style.width = c.w + "vw"; el.style.height = c.h + "vh"; el.style.fontSize = "2.9vmin"; }
+    el.style.border = "2px solid " + c.color;
+    const press = e => {
+      e.preventDefault();
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+      if (c.send.btn) setBtn(c.send.btn, 1); else setAxis(c.send.axis, c.send.v);
+      el.classList.add("on"); el.style.background = c.color; vib(14);
+    };
+    const release = () => {
+      if (c.send.btn) setBtn(c.send.btn, 0); else setAxis(c.send.axis, 0);
+      el.classList.remove("on"); el.style.background = "";
+    };
+    el.addEventListener("pointerdown", press);
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointercancel", release);
+    return el;
+  }
+
+  function makeStick(c) {
+    const zone = document.createElement("div");
+    zone.className = "zone";
+    zone.style.left = c.x + "%"; zone.style.top = c.y + "%";
+    zone.style.width = zone.style.height = c.d + "vmin";
+    const knob = document.createElement("div");
+    knob.className = "knob";
+    zone.appendChild(knob);
+    let pid = null, cx = 0, cy = 0, R = 1;
+    const move = e => {
+      if (e.pointerId !== pid) return;
+      let dx = (e.clientX - cx) / R, dy = (e.clientY - cy) / R;
+      const m = Math.hypot(dx, dy);
+      if (m > 1) { dx /= m; dy /= m; }
+      setAxis(c.ax, +dx.toFixed(3));
+      setAxis(c.ay, +(-dy).toFixed(3));
+      knob.style.transition = "none";
+      knob.style.transform = `translate(${dx * R * .6}px, ${dy * R * .6}px)`;
+    };
+    const end = e => {
+      if (e.pointerId !== pid) return;
+      pid = null; setAxis(c.ax, 0); setAxis(c.ay, 0);
+      knob.style.transition = "transform .09s";
+      knob.style.transform = "";
+    };
+    zone.addEventListener("pointerdown", e => {
+      e.preventDefault(); pid = e.pointerId;
+      try { zone.setPointerCapture(pid); } catch (err) {}
+      cx = e.clientX; cy = e.clientY;              // stick centers on the thumb
+      R = zone.getBoundingClientRect().width * .42;
+      vib(8); move(e);
+    });
+    zone.addEventListener("pointermove", move);
+    zone.addEventListener("pointerup", end);
+    zone.addEventListener("pointercancel", end);
+    return zone;
+  }
+
+  function makeDpad(c) {
+    const pad = document.createElement("div");
+    pad.className = "dpad";
+    pad.style.left = c.x + "%"; pad.style.top = c.y + "%";
+    pad.style.width = pad.style.height = c.d + "vmin";
+    const arms = {};
+    [["up","u","▲"],["down","d","▼"],["left","l","◀"],["right","r","▶"]].forEach(([n, cls, g]) => {
+      const a = document.createElement("div");
+      a.className = "arm " + cls; a.textContent = g;
+      pad.appendChild(a); arms[n] = a;
+    });
+    let pid = null;
+    const set = (n, on) => {
+      const v = on ? 1 : 0;
+      if ((state.btn[n] || 0) !== v) { setBtn(n, v); arms[n].classList.toggle("lit", on); if (on) vib(10); }
+    };
+    const clear = () => ["up","down","left","right"].forEach(n => set(n, false));
+    const move = e => {
+      if (e.pointerId !== pid) return;
+      const r = pad.getBoundingClientRect();
+      const dx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+      const dy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+      if (Math.hypot(dx, dy) < .25) { clear(); return; }   // center deadzone
+      set("up", dy < -.38); set("down", dy > .38);
+      set("left", dx < -.38); set("right", dx > .38);      // diagonals allowed
+    };
+    const end = e => { if (e.pointerId !== pid) return; pid = null; clear(); };
+    pad.addEventListener("pointerdown", e => {
+      e.preventDefault(); pid = e.pointerId;
+      try { pad.setPointerCapture(pid); } catch (err) {}
+      move(e);
+    });
+    pad.addEventListener("pointermove", move);
+    pad.addEventListener("pointerup", end);
+    pad.addEventListener("pointercancel", end);
+    return pad;
+  }
+
+  function render() {
+    resetState();
+    const box = $("controls");
+    box.innerHTML = "";
+    L[layout].controls.forEach(c => {
+      box.appendChild(c.t === "btn" ? makeBtn(c) : c.t === "stick" ? makeStick(c) : makeDpad(c));
+    });
+    $("lay").textContent = L[layout].name;
+    try { localStorage.setItem("padlayout", layout); } catch (e) {}
+  }
+  $("lay").addEventListener("pointerdown", e => {
+    e.stopPropagation();
+    layout = ORDER[(ORDER.indexOf(layout) + 1) % ORDER.length];
+    vib(10); render();
+  });
+  render();
+
+  /* ============== send loop + input socket ============== */
+  setInterval(() => {
+    if (!ws || ws.readyState !== 1) return;
+    const now = Date.now();
+    if (dirty || now - lastSent > 400) {
+      ws.send(JSON.stringify({ t:"state", ...state }));
+      dirty = false; lastSent = now;
+    }
+  }, 16);
+  setInterval(() => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:"ping", ts:Date.now() }));
+  }, 2000);
+
+  function connect() {
+    ws = new WebSocket(`ws://${location.host}/ws?s=${encodeURIComponent(code)}`);
+    ws.onopen = () => { $("dot").classList.add("ok"); dirty = true; };
+    ws.onmessage = e => {
+      let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === "hello") {
+        $("player").textContent = "P" + m.player;
+        $("mock").style.display = m.mode === "mock" ? "inline" : "none";
+      } else if (m.t === "pong") $("ping").textContent = (Date.now() - m.ts) + " ms";
+      else if (m.t === "full") $("player").textContent = "server full";
+    };
+    ws.onclose = () => {
+      $("dot").classList.remove("ok");
+      $("player").textContent = "reconnecting…";
+      setTimeout(connect, 1500);
+    };
+  }
+  connect();
+
+  /* ============== fullscreen + wake ============== */
+  let awake = false;
+  async function keepAwake() {
+    if (awake) return;
+    try { await navigator.wakeLock.request("screen"); awake = true; return; } catch (e) {}
+    try {
+      const c = document.createElement("canvas"); c.width = c.height = 2;
+      setInterval(() => c.getContext("2d").fillRect(0, 0, 2, 2), 30000);
+      const v = document.createElement("video");
+      v.muted = true; v.playsInline = true;
+      v.srcObject = c.captureStream(1);
+      v.style.cssText = "position:fixed;width:1px;height:1px;opacity:0";
+      document.body.appendChild(v);
+      await v.play(); awake = true;
+    } catch (e) {}
+  }
+  $("fs").addEventListener("pointerdown", async e => {
+    e.stopPropagation();
+    try { await document.documentElement.requestFullscreen(); } catch (err) {}
+    try { await screen.orientation.lock("landscape"); } catch (err) {}
+    keepAwake();
+  });
+  document.body.addEventListener("pointerdown", keepAwake, { once:true });
+  document.addEventListener("contextmenu", e => e.preventDefault());
+
+  /* ============== live game video behind the controls ============== */
+  const vid = $("stream"), unmute = $("unmute");
+  let sig = null, pc = null;
+  function connectSig() {
+    sig = new WebSocket(`ws://${location.host}/rtc?role=view&s=${encodeURIComponent(code)}`);
+    sig.onmessage = async e => {
+      let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === "offer") {
+        if (pc) pc.close();
+        pc = new RTCPeerConnection();
+        pc.ontrack = ev => {
+          vid.srcObject = ev.streams[0];
+          vid.style.display = "block";
+          if (vid.muted) unmute.style.display = "inline";
+        };
+        pc.onicecandidate = ev => {
+          if (ev.candidate && sig.readyState === 1)
+            sig.send(JSON.stringify({ t:"ice", cand:ev.candidate }));
+        };
+        await pc.setRemoteDescription(m.sdp);
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        sig.send(JSON.stringify({ t:"answer", sdp:pc.localDescription }));
+      } else if (m.t === "ice") {
+        if (pc && m.cand) try { await pc.addIceCandidate(m.cand); } catch (err) {}
+      } else if (m.t === "host-gone") {
+        if (pc) { pc.close(); pc = null; }
+        vid.srcObject = null; vid.style.display = "none"; unmute.style.display = "none";
+      }
+    };
+    sig.onclose = () => setTimeout(connectSig, 2000);
+  }
+  connectSig();
+  unmute.addEventListener("pointerdown", e => {
+    e.stopPropagation(); vid.muted = false; unmute.style.display = "none";
+  });
+})();
+</script>
+</body>
+</html>

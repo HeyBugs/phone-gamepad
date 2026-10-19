@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phone Pad — Watch</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; background:#000; color:#dfe3e8;
+      font-family:system-ui, sans-serif; overflow:hidden; }
+  #v { width:100%; height:100%; object-fit:contain; background:#000; }
+  #bar { position:fixed; top:0; left:0; right:0; display:flex; gap:14px;
+      align-items:center; padding:10px 14px; font-size:14px;
+      background:linear-gradient(rgba(0,0,0,.7), transparent);
+      transition:opacity .4s; }
+  #bar.hide { opacity:0; pointer-events:none; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#c33; }
+  .dot.ok { background:#3c9; }
+  #pad { color:#8a93a0; }
+  #pad.on { color:#58c98a; font-weight:600; }
+  a { color:#9fc1ee; }
+  button { background:rgba(40,44,52,.8); color:#dfe3e8; border:1px solid #3a3f49;
+      border-radius:8px; padding:6px 12px; cursor:pointer; font-size:13px; }
+  #center { position:fixed; inset:0; display:flex; align-items:center;
+      justify-content:center; text-align:center; font-size:18px; color:#8a93a0;
+      padding:24px; }
+</style>
+</head>
+<body>
+  <video id="v" autoplay playsinline muted></video>
+  <div id="center">Waiting for the host to share the game screen…</div>
+  <div id="bar">
+    <div class="dot" id="dot"></div>
+    <span id="state">connecting…</span>
+    <span id="pad">no gamepad — press any button on one</span>
+    <button id="unmute">🔊 unmute</button>
+    <button id="fs">⛶ fullscreen</button>
+    <a href="#" id="touch">touch controller</a>
+  </div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  let code = (qs.get("s") || localStorage.getItem("padcode") || "").toUpperCase();
+  if (!code) code = (prompt("Session code (shown on the PC):") || "").toUpperCase();
+  try { localStorage.setItem("padcode", code); } catch (e) {}
+  $("touch").href = "/?s=" + encodeURIComponent(code);
+
+  // ---- video via WebRTC ----
+  let sig = null, pc = null;
+  function connectSig() {
+    sig = new WebSocket(`ws://${location.host}/rtc?role=view&s=${encodeURIComponent(code)}`);
+    sig.onopen = () => { $("dot").classList.add("ok"); $("state").textContent = "waiting for stream"; };
+    sig.onmessage = async e => {
+      let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === "offer") {
+        if (pc) pc.close();
+        pc = new RTCPeerConnection();
+        pc.ontrack = ev => {
+          $("v").srcObject = ev.streams[0];
+          $("center").style.display = "none";
+          $("state").textContent = "live";
+        };
+        pc.onicecandidate = ev => {
+          if (ev.candidate && sig.readyState === 1)
+            sig.send(JSON.stringify({ t:"ice", cand:ev.candidate }));
+        };
+        await pc.setRemoteDescription(m.sdp);
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        sig.send(JSON.stringify({ t:"answer", sdp:pc.localDescription }));
+      } else if (m.t === "ice") {
+        if (pc && m.cand) try { await pc.addIceCandidate(m.cand); } catch (err) {}
+      } else if (m.t === "host-gone") {
+        if (pc) { pc.close(); pc = null; }
+        $("v").srcObject = null;
+        $("center").style.display = "flex";
+        $("state").textContent = "waiting for stream";
+      }
+    };
+    sig.onclose = () => { $("dot").classList.remove("ok");
+      $("state").textContent = "reconnecting…"; setTimeout(connectSig, 1500); };
+  }
+  connectSig();
+
+  // ---- physical gamepad in this browser -> player slot on the PC ----
+  let input = null, player = null, lastJson = "", lastSent = 0;
+  function connectInput() {
+    if (input) return;
+    input = new WebSocket(`ws://${location.host}/ws?s=${encodeURIComponent(code)}`);
+    input.onmessage = e => {
+      let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === "hello") { player = m.player;
+        $("pad").textContent = "gamepad = P" + player; $("pad").classList.add("on"); }
+      else if (m.t === "full") $("pad").textContent = "server full (4 max)";
+    };
+    input.onclose = () => { input = null; player = null;
+      if (lastJson) setTimeout(connectInput, 1500); };
+  }
+
+  const BTN = ["a","b","x","y","lb","rb",null,null,"back","start","ls","rs","up","down","left","right"];
+  function poll() {
+    requestAnimationFrame(poll);
+    const gp = [...(navigator.getGamepads() || [])].find(g => g && g.connected);
+    if (!gp) return;
+    if (!input) connectInput();
+    if (!input || input.readyState !== 1) return;
+    const st = { t:"state", btn:{}, lx:0, ly:0, rx:0, ry:0, lt:0, rt:0 };
+    BTN.forEach((name, i) => { if (name && gp.buttons[i]) st.btn[name] = gp.buttons[i].pressed ? 1 : 0; });
+    st.lt = +(gp.buttons[6] ? gp.buttons[6].value : 0).toFixed(2);
+    st.rt = +(gp.buttons[7] ? gp.buttons[7].value : 0).toFixed(2);
+    const dz = v => Math.abs(v) < 0.08 ? 0 : v;
+    st.lx = +dz(gp.axes[0] || 0).toFixed(3);
+    st.ly = +(-dz(gp.axes[1] || 0)).toFixed(3);   // browser y down -> pad y up
+    st.rx = +dz(gp.axes[2] || 0).toFixed(3);
+    st.ry = +(-dz(gp.axes[3] || 0)).toFixed(3);
+    const j = JSON.stringify(st), now = Date.now();
+    if (j !== lastJson || now - lastSent > 400) { input.send(j); lastJson = j; lastSent = now; }
+  }
+  poll();
+
+  // ---- small UI ----
+  $("unmute").onclick = () => { $("v").muted = false; $("unmute").style.display = "none"; };
+  $("fs").onclick = () => { document.documentElement.requestFullscreen().catch(() => {}); };
+  let hideTimer = null;
+  function showBar() {
+    $("bar").classList.remove("hide");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => $("bar").classList.add("hide"), 3500);
+  }
+  ["pointermove", "pointerdown", "keydown"].forEach(ev => addEventListener(ev, showBar));
+  showBar();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Game Room</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { min-height:100%; background:#14161a; color:#dfe3e8;
+      font-family:system-ui, sans-serif; }
+  #library { padding:28px 20px; max-width:860px; margin:0 auto; }
+  h1 { font-size:26px; margin-bottom:4px; }
+  .sub { color:#8a93a0; margin-bottom:26px; font-size:14px; }
+  h2 { font-size:14px; color:#8a93a0; text-transform:uppercase;
+      letter-spacing:2px; margin:26px 0 10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px; }
+  .game { background:#1b1e24; border:1px solid #2c3039; border-radius:12px;
+      padding:16px; cursor:pointer; transition:border-color .15s, transform .15s; }
+  .game:hover { border-color:#3a7bd5; transform:translateY(-2px); }
+  .game .name { font-weight:600; margin-bottom:6px; }
+  .game .meta { color:#8a93a0; font-size:13px; }
+  .empty { color:#555c66; font-size:14px; }
+  .links { margin-top:34px; font-size:14px; color:#8a93a0; }
+  .links a { color:#9fc1ee; }
+
+  #player { display:none; position:fixed; inset:0; background:#000; }
+  #game { width:100%; height:100%; }
+  #back { position:fixed; top:10px; left:10px; z-index:100;
+      background:rgba(40,44,52,.85); color:#dfe3e8; border:1px solid #3a3f49;
+      border-radius:8px; padding:8px 14px; cursor:pointer; font-size:14px; }
+</style>
+</head>
+<body>
+  <div id="library">
+    <h1>🎮 Game Room</h1>
+    <div class="sub">Pick a game — it runs right here in this browser, on this device.
+      Phones get touch controls automatically. N64 is heavier in a browser:
+      if it stutters, use the streamed setup instead.</div>
+    <div id="lists">loading…</div>
+    <div class="links">
+      Other ways to play: <a id="l-ctrl" href="/">phone touch controller</a> ·
+      <a id="l-watch" href="/watch">watch the PC stream</a> ·
+      <a href="/status">status</a>
+    </div>
+  </div>
+
+  <div id="player">
+    <button id="back" onclick="location.reload()">← games</button>
+    <div id="game"></div>
+  </div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  let code = (qs.get("s") || localStorage.getItem("padcode") || "").toUpperCase();
+  if (!code) code = (prompt("Session code (shown on the PC):") || "").toUpperCase();
+  try { localStorage.setItem("padcode", code); } catch (e) {}
+  $("l-ctrl").href = "/?s=" + encodeURIComponent(code);
+  $("l-watch").href = "/watch?s=" + encodeURIComponent(code);
+
+  const LABEL = { n64: "Nintendo 64", snes: "Super Nintendo", nes: "NES" };
+
+  async function load() {
+    let roms;
+    try {
+      const r = await fetch("/api/roms?s=" + encodeURIComponent(code));
+      if (!r.ok) { $("lists").textContent = "Wrong session code — reload and enter the code from the PC."; return; }
+      roms = await r.json();
+    } catch (e) { $("lists").textContent = "Server unreachable."; return; }
+
+    const wrap = $("lists");
+    wrap.innerHTML = "";
+    let any = false;
+    for (const sys of Object.keys(LABEL)) {
+      const h = document.createElement("h2");
+      h.textContent = LABEL[sys];
+      wrap.appendChild(h);
+      const grid = document.createElement("div");
+      grid.className = "grid";
+      wrap.appendChild(grid);
+      const list = roms[sys] || [];
+      if (!list.length) {
+        const d = document.createElement("div");
+        d.className = "empty";
+        d.textContent = "nothing in retro-games\\" + sys + " yet";
+        grid.appendChild(d);
+        continue;
+      }
+      for (const name of list) {
+        any = true;
+        const card = document.createElement("div");
+        card.className = "game";
+        card.innerHTML = `<div class="name"></div><div class="meta">tap to play in this browser</div>`;
+        card.querySelector(".name").textContent = name.replace(/\.[^.]+$/, "");
+        card.onclick = () => start(sys, name);
+        grid.appendChild(card);
+      }
+    }
+    if (!any) {
+      const d = document.createElement("div");
+      d.className = "empty";
+      d.textContent = "Drop your game dumps into Documents\\retro-games and refresh.";
+      wrap.appendChild(d);
+    }
+  }
+
+  function start(sys, name) {
+    $("library").style.display = "none";
+    $("player").style.display = "block";
+    // EmulatorJS (open source) — cores run as WebAssembly in this page
+    window.EJS_player = "#game";
+    window.EJS_core = sys;
+    window.EJS_gameName = name.replace(/\.[^.]+$/, "");
+    window.EJS_gameUrl = `/rom/${sys}/${encodeURIComponent(name)}?s=${encodeURIComponent(code)}`;
+    window.EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
+    window.EJS_startOnLoaded = true;
+    window.EJS_backgroundColor = "#000";
+    const s = document.createElement("script");
+    s.src = "https://cdn.emulatorjs.org/stable/data/loader.js";
+    document.body.appendChild(s);
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

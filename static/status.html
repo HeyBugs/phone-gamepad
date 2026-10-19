@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Pad — Status</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; background:#14161a; color:#dfe3e8;
+      font-family:system-ui, sans-serif; padding:24px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:#8a93a0; margin-bottom:20px; }
+  .wrap { display:flex; gap:28px; flex-wrap:wrap; align-items:flex-start; }
+  .card { background:#1b1e24; border:1px solid #2c3039; border-radius:12px; padding:18px; }
+  .qr { text-align:center; }
+  .qr img { width:220px; height:220px; background:#fff; border-radius:8px; padding:8px; }
+  .url { font-family:Consolas, monospace; font-size:14px; margin-top:10px; color:#9fc1ee; }
+  .code { font-size:28px; letter-spacing:6px; font-weight:700; margin-top:6px; }
+  .banner { padding:10px 14px; border-radius:8px; margin-bottom:16px; font-size:14px; }
+  .banner.mock { background:#43391c; color:#e6b450; }
+  .banner.vigem { background:#1d3a2a; color:#58c98a; }
+  table { border-collapse:collapse; min-width:560px; }
+  th, td { text-align:left; padding:8px 14px; border-bottom:1px solid #2c3039; font-size:14px; }
+  th { color:#8a93a0; font-weight:600; }
+  .empty { color:#555c66; }
+  .pressed { color:#5b9bf0; font-weight:700; }
+  .sticks { font-family:Consolas, monospace; font-size:13px; color:#9aa4b1; }
+</style>
+</head>
+<body>
+  <h1>Phone Gamepad</h1>
+  <div class="sub">Scan the QR with each phone. Up to 4 players.
+    &nbsp;·&nbsp; <a href="/host" style="color:#9fc1ee">share game screen (this PC)</a>
+    &nbsp;·&nbsp; <a id="watchlink" href="/watch" style="color:#9fc1ee">watch + gamepad page</a>
+    &nbsp;·&nbsp; <a id="playlink" href="/play" style="color:#9fc1ee">game room (play in browser)</a></div>
+  <div id="banner" class="banner">loading…</div>
+  <div class="wrap">
+    <div class="card qr">
+      <img src="/qr.svg" alt="QR code">
+      <div class="url" id="url"></div>
+      <div class="code" id="code"></div>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>Slot</th><th>Phone</th><th>Connected</th><th>Buttons held</th><th>Sticks / triggers</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+<script>
+async function tick() {
+  let d;
+  try { d = await (await fetch("/api/status")).json(); } catch (e) { return; }
+  document.getElementById("url").textContent = d.url;
+  document.getElementById("code").textContent = d.code;
+  const b = document.getElementById("banner");
+  if (d.mode === "mock") {
+    b.className = "banner mock";
+    b.textContent = "TEST MODE — ViGEmBus driver not installed. Input arrives and shows below, but games can't see it yet." + (d.error ? " (" + d.error + ")" : "");
+  } else {
+    b.className = "banner vigem";
+    b.textContent = "LIVE — each phone is a virtual Xbox 360 controller. Check Win+R → joy.cpl";
+  }
+  const rows = d.slots.map((s, i) => {
+    if (!s) return `<tr><td>P${i + 1}</td><td class="empty" colspan="4">— open —</td></tr>`;
+    const held = Object.entries(s.state.btn || {}).filter(([, v]) => v).map(([k]) => k.toUpperCase());
+    const st = s.state;
+    return `<tr><td>P${s.player}</td><td>${s.ip}</td><td>${s.connected_s}s</td>
+      <td class="pressed">${held.join(" ") || "<span class='empty'>none</span>"}</td>
+      <td class="sticks">L(${(+st.lx).toFixed(2)}, ${(+st.ly).toFixed(2)}) R(${(+st.rx).toFixed(2)}, ${(+st.ry).toFixed(2)}) LT ${(+st.lt).toFixed(1)} RT ${(+st.rt).toFixed(1)}</td></tr>`;
+  });
+  document.getElementById("rows").innerHTML = rows.join("");
+}
+setInterval(tick, 500);
+tick();
+</script>
+</body>
+</html>

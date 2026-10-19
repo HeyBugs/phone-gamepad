@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Pad — Share Screen</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; background:#14161a; color:#dfe3e8;
+      font-family:system-ui, sans-serif; padding:24px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:#8a93a0; margin-bottom:20px; }
+  .card { background:#1b1e24; border:1px solid #2c3039; border-radius:12px;
+      padding:18px; max-width:640px; margin-bottom:16px; }
+  button { background:#3a7bd5; color:#fff; border:0; border-radius:8px;
+      padding:12px 22px; font-size:16px; cursor:pointer; }
+  button:disabled { background:#2c3039; color:#666; cursor:default; }
+  #stop { background:#8a4040; display:none; }
+  .warn { background:#43391c; color:#e6b450; padding:10px 14px;
+      border-radius:8px; margin-bottom:16px; display:none; }
+  #preview { width:100%; max-width:600px; border-radius:8px; background:#000;
+      display:none; margin-top:14px; }
+  .stat { color:#8a93a0; font-size:14px; margin-top:10px; }
+  .ok { color:#58c98a; }
+</style>
+</head>
+<body>
+  <h1>Share the game screen</h1>
+  <div class="sub">Open this page on the gaming PC itself. Viewers open <b>/watch</b> on their devices.</div>
+  <div class="warn" id="warn">getDisplayMedia needs a secure context — open this page as
+    <b>http://localhost:8765/host</b> on the gaming PC, not via the LAN IP.</div>
+  <div class="card">
+    <button id="start">Start sharing</button>
+    <button id="stop">Stop</button>
+    <div class="stat">Signaling: <span id="sig">connecting…</span></div>
+    <div class="stat">Sharing: <span id="sharing">no</span></div>
+    <div class="stat">Viewers: <span id="count">0</span></div>
+    <video id="preview" autoplay muted playsinline></video>
+  </div>
+  <div class="sub">Tip: choose the game's <i>window</i> (lower latency than whole screen) and tick
+    "share audio" if offered. Keep this tab open while playing.</div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  let code = (qs.get("s") || localStorage.getItem("padcode") || "").toUpperCase();
+  if (!code) code = (prompt("Session code (from the server window):") || "").toUpperCase();
+  try { localStorage.setItem("padcode", code); } catch (e) {}
+
+  if (!window.isSecureContext) $("warn").style.display = "block";
+
+  let ws = null, stream = null;
+  const pcs = {};            // viewer id -> RTCPeerConnection
+  const viewers = new Set(); // viewer ids currently connected
+
+  function updateCount() { $("count").textContent = viewers.size; }
+
+  async function newPeer(id) {
+    if (!stream || pcs[id]) return;
+    const pc = new RTCPeerConnection();
+    pcs[id] = pc;
+    stream.getTracks().forEach(tr => pc.addTrack(tr, stream));
+    pc.onicecandidate = e => {
+      if (e.candidate && ws && ws.readyState === 1)
+        ws.send(JSON.stringify({ t:"ice", to:id, cand:e.candidate }));
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ t:"offer", to:id, sdp:pc.localDescription }));
+  }
+
+  function dropPeer(id) {
+    if (pcs[id]) { pcs[id].close(); delete pcs[id]; }
+  }
+
+  function connect() {
+    ws = new WebSocket(`ws://${location.host}/rtc?role=host&s=${encodeURIComponent(code)}`);
+    ws.onopen = () => { $("sig").textContent = "connected"; $("sig").className = "ok"; };
+    ws.onmessage = async e => {
+      let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.t === "viewer-joined") { viewers.add(m.id); updateCount(); newPeer(m.id); }
+      else if (m.t === "viewer-left") { viewers.delete(m.id); updateCount(); dropPeer(m.id); }
+      else if (m.t === "answer") { const pc = pcs[m.from]; if (pc) await pc.setRemoteDescription(m.sdp); }
+      else if (m.t === "ice") { const pc = pcs[m.from]; if (pc && m.cand) try { await pc.addIceCandidate(m.cand); } catch (err) {} }
+    };
+    ws.onclose = () => { $("sig").textContent = "reconnecting…"; $("sig").className = "";
+      setTimeout(connect, 1500); };
+  }
+  connect();
+
+  $("start").onclick = async () => {
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia(
+        { video: { frameRate: 60 }, audio: true });
+    } catch (e) { return; }
+    $("preview").srcObject = stream;
+    $("preview").style.display = "block";
+    $("sharing").textContent = "yes"; $("sharing").className = "ok";
+    $("start").style.display = "none"; $("stop").style.display = "inline-block";
+    stream.getVideoTracks()[0].onended = stopShare;   // browser's own Stop button
+    viewers.forEach(id => newPeer(id));
+  };
+
+  function stopShare() {
+    if (stream) { stream.getTracks().forEach(tr => tr.stop()); stream = null; }
+    Object.keys(pcs).forEach(dropPeer);
+    $("preview").style.display = "none";
+    $("sharing").textContent = "no"; $("sharing").className = "";
+    $("start").style.display = "inline-block"; $("stop").style.display = "none";
+  }
+  $("stop").onclick = stopShare;
+})();
+</script>
+</body>
+</html>
